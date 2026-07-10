@@ -118,6 +118,9 @@ export default {
       //   A) 路由保持 /inventory 前缀 → 回调用 /inventory/wecom/kf（零控制台改动）
       //   B) 路由改成 /* 或新增 /wecom/kf → 回调用 /wecom/kf
       if (p === '/inventory' && request.method === 'GET') return await handleInventory();
+      // 网页客服对话（不依赖微信认证，ESA 直接托管 UI + API）— 访问 /inventory/chat 即可对话
+      if (p.endsWith('/inventory/chat') && request.method === 'POST') return await handleChatApi(request);
+      if (p.endsWith('/inventory/chat') && request.method === 'GET') return await handleChatUi();
       if (p.endsWith('/wecom/kf')) return await handleWecomKf(request);
       if (p.endsWith('/wecom/debug')) return new Response(JSON.stringify(_lastCb || { note: '尚无回调记录' }, null, 2), { headers: CORS });
       if (p.endsWith('/order') && request.method === 'POST') return await handleOrder(request);
@@ -282,11 +285,10 @@ async function tacoTalk(text) {
   const t = (text || '').trim();
   if (/(库存|有什么|报价|价格|多少钱|广告位|刊例|还有吗)/.test(t)) {
     try {
-      const inv = await (await fetch('https://api.tabako.online/inventory')).json();
-      const list = inv.data || inv;
-      const avail = list.filter(x => x.status === '可购买' || x.status === '可预订');
+      const recs = await feishuList(TBL_INVENTORY);
+      const avail = recs.filter(r => r.fields['当前状态'] === '可购买' || r.fields['当前状态'] === '可预订');
       if (!avail.length) return '当前暂无可购买的广告位，下架/售罄后会实时同步恢复～';
-      const top = avail.slice(0, 6).map(x => `· ${x.name}｜${x.price}元`).join('\n');
+      const top = avail.slice(0, 6).map(r => `· ${r.fields['资源名称'] || ''}｜${r.fields['刊例价格'] || ''}元`).join('\n');
       return `📣 当前可购买 ${avail.length} 个广告位：\n${top}\n\n回复「预订+广告位名」或访问官网下单。`;
     } catch (e) {
       return '库存查询暂时不可用，请稍后再试。';
@@ -376,4 +378,80 @@ async function handleWecomKf(request) {
     return new Response('success', { status: 200 });
   }
   return new Response('method not allowed', { status: 405 });
+}
+
+// ============ 网页客服对话（不依赖微信认证，ESA 直接托管 UI + API） ============
+async function handleChatApi(request) {
+  let q = '';
+  try { const b = await request.json(); q = b.q || ''; } catch (e) {}
+  const reply = await tacoTalk(q);
+  return json({ reply }, 200);
+}
+async function handleChatUi() {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taco 智能体 · 在线咨询</title>
+<style>
+  :root { --bg:#0b0e14; --card:rgba(255,255,255,.04); --line:rgba(255,255,255,.08); --accent:#f5a623; --txt:#e8eaf0; --sub:#8a90a2; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:radial-gradient(1200px 600px at 70% -10%,rgba(245,166,35,.10),transparent),var(--bg); color:var(--txt); min-height:100vh; display:flex; justify-content:center; padding:24px; }
+  .wrap { width:100%; max-width:480px; display:flex; flex-direction:column; height:calc(100vh - 48px); }
+  header { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--line); border-radius:18px 18px 0 0; background:var(--card); backdrop-filter:blur(20px); }
+  .logo { width:42px; height:42px; border-radius:12px; background:linear-gradient(135deg,var(--accent),#ff7a45); display:flex; align-items:center; justify-content:center; font-size:22px; box-shadow:0 6px 20px rgba(245,166,35,.35); }
+  .meta b { font-size:15px; } .meta span { font-size:12px; color:var(--sub); }
+  .dot { width:8px; height:8px; border-radius:50%; background:#3ddc84; display:inline-block; margin-right:5px; box-shadow:0 0 8px #3ddc84; }
+  .box { flex:1; overflow-y:auto; padding:18px 14px; display:flex; flex-direction:column; gap:12px; border-left:1px solid var(--line); border-right:1px solid var(--line); background:rgba(0,0,0,.15); }
+  .msg { max-width:82%; padding:11px 14px; border-radius:14px; font-size:14px; line-height:1.6; white-space:pre-wrap; word-break:break-word; }
+  .bot { align-self:flex-start; background:var(--card); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  .me { align-self:flex-end; background:linear-gradient(135deg,var(--accent),#ff7a45); color:#1a1205; border-bottom-right-radius:4px; font-weight:500; }
+  .typing { align-self:flex-start; color:var(--sub); font-size:13px; padding:6px 4px; }
+  footer { display:flex; gap:10px; padding:14px 16px; border:1px solid var(--line); border-top:none; border-radius:0 0 18px 18px; background:var(--card); }
+  input { flex:1; background:rgba(0,0,0,.25); border:1px solid var(--line); border-radius:12px; padding:12px 14px; color:var(--txt); font-size:14px; outline:none; }
+  input:focus { border-color:var(--accent); }
+  button { border:none; border-radius:12px; padding:0 18px; background:linear-gradient(135deg,var(--accent),#ff7a45); color:#1a1205; font-weight:600; cursor:pointer; font-size:14px; transition:transform .15s; }
+  button:active { transform:scale(.95); }
+  .hint { text-align:center; color:var(--sub); font-size:12px; padding:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🌮</div>
+    <div class="meta"><b>Taco 智能体</b><br><span><i class="dot"></i>在线 · 广告位库存与报价咨询</span></div>
+  </header>
+  <div class="box" id="box">
+    <div class="msg bot">你好，我是 Taco 智能体 🌮 可为你查报纸 / 公众号广告位库存与报价。\n试试：「有哪些广告位？」「预订封底整版」</div>
+  </div>
+  <footer>
+    <input id="inp" placeholder="输入你的问题，回车发送…" autocomplete="off">
+    <button id="send">发送</button>
+  </footer>
+  <div class="hint">由 ESA 边缘函数直接托管 · 无需微信认证</div>
+</div>
+<script>
+  const box = document.getElementById('box');
+  const inp = document.getElementById('inp');
+  const send = document.getElementById('send');
+  const API = location.pathname;
+  function add(text, who){ const d=document.createElement('div'); d.className='msg '+who; d.textContent=text; box.appendChild(d); box.scrollTop=box.scrollHeight; }
+  async function go(){
+    const q = inp.value.trim(); if(!q) return;
+    add(q,'me'); inp.value='';
+    const t=document.createElement('div'); t.className='typing'; t.textContent='Taco 正在输入…'; box.appendChild(t); box.scrollTop=box.scrollHeight;
+    try {
+      const r = await fetch(API, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ q }) });
+      const d = await r.json();
+      t.remove(); add(d.reply || '（暂无回复）','bot');
+    } catch(e){ t.remove(); add('网络异常，请稍后再试。','bot'); }
+  }
+  send.onclick = go;
+  inp.addEventListener('keydown', e => { if(e.key==='Enter') go(); });
+  inp.focus();
+</script>
+</body>
+</html>`;
+  return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
 }
