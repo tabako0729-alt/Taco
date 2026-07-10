@@ -249,6 +249,7 @@ function xmlGet(xml, tag) {
 }
 // 微信客服 access_token 缓存（内存，提前 5 分钟过期）
 let _kfTok = '', _kfExp = 0;
+let _seenMsgIds = []; // 已处理 msgid 去重（内存，边缘实例回收后失效，配合 send_time 60s 过滤兜底）
 async function getKfToken() {
   if (_kfTok && Date.now() < _kfExp) return _kfTok;
   const r = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${WECOM_CORPID}&corpsecret=${WECOM_KF_SECRET}`);
@@ -313,6 +314,8 @@ async function handleWecomKf(request) {
     return new Response(plain, { status: 200 });
   }
   if (request.method === 'POST') {
+    // 微信客服两段式：回调只推 kf_msg_or_event 事件（含 Token + OpenKfId，不含消息内容），
+    // 须用 Token + OpenKfId 调 sync_msg 主动拉取 msg_list，再对客户消息(origin=3)回复。
     const sig = url.searchParams.get('msg_signature');
     const ts = url.searchParams.get('timestamp');
     const nonce = url.searchParams.get('nonce');
@@ -321,18 +324,39 @@ async function handleWecomKf(request) {
     if (!encrypt) return new Response('no encrypt', { status: 400 });
     if (!(await verifySignature(sig, ts, nonce, encrypt))) return new Response('verify fail', { status: 401 });
     const plain = await aesDecrypt(WECOM_AES_KEY, encrypt);
-    const msgType = xmlGet(plain, 'MsgType');
-    const fromUser = xmlGet(plain, 'FromUserName');
-    const toKf = xmlGet(plain, 'ToUserName'); // 客户从哪个客服号发的，就从哪个号回
-    const content = xmlGet(plain, 'Content');
-    if (msgType === 'text') {
+    const event = xmlGet(plain, 'Event');
+    const syncToken = xmlGet(plain, 'Token');     // 拉消息用的 token（10分钟有效）
+    const openKfId = xmlGet(plain, 'OpenKfId');    // 有新消息的客服账号
+    if (event !== 'kf_msg_or_event') return new Response('success', { status: 200 });
+
+    // 拉取消息
+    const tok = await getKfToken();
+    const syncRes = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=${tok}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: syncToken, open_kfid: openKfId, limit: 1000 }),
+    });
+    const syncData = await syncRes.json();
+    if (syncData.errcode !== 0) return new Response('success', { status: 200 }); // sync 失败也回 success，避免重试
+
+    // 遍历消息列表，只回复客户发的(origin=3)文本消息，且只回最近 60 秒内的（避免重处理历史）
+    const now = Math.floor(Date.now() / 1000);
+    const seen = new Set(_seenMsgIds || []);
+    for (const msg of (syncData.msg_list || [])) {
+      if (msg.origin !== 3) continue;            // 非客户发送
+      if (msg.msgtype !== 'text') continue;       // 非文本
+      if (now - (msg.send_time || 0) > 60) continue; // 超过 60 秒的历史消息跳过
+      if (seen.has(msg.msgid)) continue;          // 已处理过
+      seen.add(msg.msgid);
+      const content = (msg.text && msg.text.content) || '';
       const reply = await tacoTalk(content);
       if (reply === '__TRANSFER__') {
-        await kfTransfer(fromUser, toKf);
+        await kfTransfer(msg.external_userid, msg.open_kfid);
       } else {
-        await kfSendText(fromUser, toKf, reply);
+        await kfSendText(msg.external_userid, msg.open_kfid, reply);
       }
     }
+    _seenMsgIds = [...seen].slice(-200); // 内存去重，保留最近 200 条
     return new Response('success', { status: 200 });
   }
   return new Response('method not allowed', { status: 405 });
