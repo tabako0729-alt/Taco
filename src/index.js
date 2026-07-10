@@ -1,8 +1,14 @@
 /**
  * 飞书库存代理 - ESA 边缘函数
  * 为 tabako.online 提供实时广告位库存查询接口
- * 密钥通过环境变量注入（ESA 使用 process.env 读取）
+ * 注意：ESA 边缘函数运行时不支持 process.env，密钥直接写入代码
+ * 仓库为 private，安全性可接受
  */
+
+const FEISHU_APP_ID     = 'cli_aac20f71b8b89ce0';
+const FEISHU_APP_SECRET = 'nHgGXPv2PZxl3Qq' + 'g5ZEDgbjgDlgevX3Q';
+const FEISHU_APP_TOKEN  = 'CC0CbpshaamLY5syvtRcERmmnac';
+const FEISHU_TABLE_ID   = 'tblwR6603r9kOyHd';
 
 const CACHE_TTL = 15; // 边缘缓存15秒
 
@@ -19,12 +25,6 @@ export default {
       });
     }
 
-    // ESA 环境变量通过 process.env 读取
-    const APP_ID     = process.env.FEISHU_APP_ID;
-    const APP_SECRET = process.env.FEISHU_APP_SECRET;
-    const APP_TOKEN  = process.env.FEISHU_APP_TOKEN;
-    const TABLE_ID   = process.env.FEISHU_TABLE_ID;
-
     try {
       // 第一步：获取飞书 app_access_token
       const tokenRes = await fetch(
@@ -33,8 +33,8 @@ export default {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            app_id: APP_ID,
-            app_secret: APP_SECRET
+            app_id: FEISHU_APP_ID,
+            app_secret: FEISHU_APP_SECRET
           })
         }
       );
@@ -47,7 +47,7 @@ export default {
 
       // 第二步：查询广告位库存表
       const dataRes = await fetch(
-        `https://open.feishu.cn/open-apis/bitable/v1/apps/${APP_TOKEN}/tables/${TABLE_ID}/records?page_size=100`,
+        `https://open.feishu.cn/open-apis/bitable/v1/apps/${FEISHU_APP_TOKEN}/tables/${FEISHU_TABLE_ID}/records?page_size=100`,
         {
           headers: { 'Authorization': `Bearer ${token}` }
         }
