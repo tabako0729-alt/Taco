@@ -1,13 +1,13 @@
 /**
  * 飞书库存代理 - ESA 边缘函数
  * 为 tabako.online 提供实时广告位库存查询接口
- * 密钥通过环境变量注入，不进代码
+ * 密钥通过环境变量注入（ESA 使用 process.env 读取）
  */
 
 const CACHE_TTL = 15; // 边缘缓存15秒
 
 export default {
-  async fetch(request, env) {
+  async fetch(request) {
     // 处理 CORS 预检请求
     if (request.method === 'OPTIONS') {
       return new Response(null, {
@@ -19,21 +19,26 @@ export default {
       });
     }
 
+    // ESA 环境变量通过 process.env 读取
+    const APP_ID     = process.env.FEISHU_APP_ID;
+    const APP_SECRET = process.env.FEISHU_APP_SECRET;
+    const APP_TOKEN  = process.env.FEISHU_APP_TOKEN;
+    const TABLE_ID   = process.env.FEISHU_TABLE_ID;
+
     try {
-      // 第一步：获取飞书 app_access_token（兼容个人开发者应用）
+      // 第一步：获取飞书 app_access_token
       const tokenRes = await fetch(
         'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            app_id: env.FEISHU_APP_ID,
-            app_secret: env.FEISHU_APP_SECRET
+            app_id: APP_ID,
+            app_secret: APP_SECRET
           })
         }
       );
       const tokenData = await tokenRes.json();
-      // app_access_token 接口返回字段名为 app_access_token
       const token = tokenData.app_access_token;
 
       if (!token) {
@@ -42,7 +47,7 @@ export default {
 
       // 第二步：查询广告位库存表
       const dataRes = await fetch(
-        `https://open.feishu.cn/open-apis/bitable/v1/apps/${env.FEISHU_APP_TOKEN}/tables/${env.FEISHU_TABLE_ID}/records?page_size=100`,
+        `https://open.feishu.cn/open-apis/bitable/v1/apps/${APP_TOKEN}/tables/${TABLE_ID}/records?page_size=100`,
         {
           headers: { 'Authorization': `Bearer ${token}` }
         }
