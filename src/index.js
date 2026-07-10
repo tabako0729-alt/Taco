@@ -119,6 +119,7 @@ export default {
       //   B) 路由改成 /* 或新增 /wecom/kf → 回调用 /wecom/kf
       if (p === '/inventory' && request.method === 'GET') return await handleInventory();
       if (p.endsWith('/wecom/kf')) return await handleWecomKf(request);
+      if (p.endsWith('/wecom/debug')) return new Response(JSON.stringify(_lastCb || { note: '尚无回调记录' }, null, 2), { headers: CORS });
       if (p.endsWith('/order') && request.method === 'POST') return await handleOrder(request);
       if (p.endsWith('/admin/toggle') && request.method === 'POST') return await handleAdminToggle(request);
       return json({ error: 'not found' }, 404);
@@ -250,6 +251,7 @@ function xmlGet(xml, tag) {
 // 微信客服 access_token 缓存（内存，提前 5 分钟过期）
 let _kfTok = '', _kfExp = 0;
 let _seenMsgIds = []; // 已处理 msgid 去重（内存，边缘实例回收后失效，配合 send_time 60s 过滤兜底）
+let _lastCb = null; // 调试：最近一次 POST 回调的完整记录（时间、解密XML、sync_msg返回、send_msg返回）
 async function getKfToken() {
   if (_kfTok && Date.now() < _kfExp) return _kfTok;
   const r = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${WECOM_CORPID}&corpsecret=${WECOM_KF_SECRET}`);
@@ -327,7 +329,10 @@ async function handleWecomKf(request) {
     const event = xmlGet(plain, 'Event');
     const syncToken = xmlGet(plain, 'Token');     // 拉消息用的 token（10分钟有效）
     const openKfId = xmlGet(plain, 'OpenKfId');    // 有新消息的客服账号
-    if (event !== 'kf_msg_or_event') return new Response('success', { status: 200 });
+    if (event !== 'kf_msg_or_event') {
+      _lastCb = { time: new Date().toISOString(), step: 'event_mismatch', event, plain_slice: plain.slice(0, 500) };
+      return new Response('success', { status: 200 });
+    }
 
     // 拉取消息
     const tok = await getKfToken();
@@ -337,11 +342,11 @@ async function handleWecomKf(request) {
       body: JSON.stringify({ token: syncToken, open_kfid: openKfId, limit: 1000 }),
     });
     const syncData = await syncRes.json();
-    if (syncData.errcode !== 0) return new Response('success', { status: 200 }); // sync 失败也回 success，避免重试
 
     // 遍历消息列表，只回复客户发的(origin=3)文本消息，且只回最近 60 秒内的（避免重处理历史）
     const now = Math.floor(Date.now() / 1000);
     const seen = new Set(_seenMsgIds || []);
+    const replies = [];
     for (const msg of (syncData.msg_list || [])) {
       if (msg.origin !== 3) continue;            // 非客户发送
       if (msg.msgtype !== 'text') continue;       // 非文本
@@ -350,13 +355,24 @@ async function handleWecomKf(request) {
       seen.add(msg.msgid);
       const content = (msg.text && msg.text.content) || '';
       const reply = await tacoTalk(content);
+      let sendResult = null;
       if (reply === '__TRANSFER__') {
-        await kfTransfer(msg.external_userid, msg.open_kfid);
+        sendResult = await kfTransfer(msg.external_userid, msg.open_kfid);
       } else {
-        await kfSendText(msg.external_userid, msg.open_kfid, reply);
+        sendResult = await kfSendText(msg.external_userid, msg.open_kfid, reply);
       }
+      replies.push({ msgid: msg.msgid, content, reply.slice(0, 80), sendResult });
     }
     _seenMsgIds = [...seen].slice(-200); // 内存去重，保留最近 200 条
+    _lastCb = {
+      time: new Date().toISOString(),
+      step: 'done',
+      openKfId, sync_errcode: syncData.errcode, sync_errmsg: syncData.errmsg,
+      msg_count: (syncData.msg_list || []).length,
+      replied: replies.length,
+      replies,
+      sync_raw: JSON.stringify(syncData).slice(0, 1000),
+    };
     return new Response('success', { status: 200 });
   }
   return new Response('method not allowed', { status: 405 });
