@@ -20,9 +20,9 @@ export default {
     }
 
     try {
-      // 第一步：获取飞书 tenant_access_token
+      // 第一步：获取飞书 app_access_token（兼容个人开发者应用）
       const tokenRes = await fetch(
-        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+        'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -33,7 +33,8 @@ export default {
         }
       );
       const tokenData = await tokenRes.json();
-      const token = tokenData.tenant_access_token;
+      // app_access_token 接口返回字段名为 app_access_token
+      const token = tokenData.app_access_token;
 
       if (!token) {
         throw new Error('获取飞书 token 失败：' + JSON.stringify(tokenData));
@@ -48,14 +49,23 @@ export default {
       );
       const data = await dataRes.json();
 
-      // 第三步：格式化数据返回给前端
+      if (data.code !== 0) {
+        throw new Error('查询库存表失败：' + JSON.stringify(data));
+      }
+
+      // 第三步：格式化数据返回给前端（字段名与飞书多维表实际字段名对应）
       const items = (data.data?.items || []).map(item => ({
         id: item.record_id,
-        panel: item.fields['版位'] || '',
-        type: item.fields['广告类型'] || '',
-        status: item.fields['售卖状态'] || '',
-        price: String(item.fields['价格'] || ''),
-        size: item.fields['尺寸'] || ''
+        name: item.fields['资源名称'] || '',
+        resource_id: item.fields['资源ID'] || '',
+        type: item.fields['媒体类型'] || '',
+        position: item.fields['版面/位置'] || '',
+        status: item.fields['当前状态'] || '',
+        price: String(item.fields['刊例价格'] || ''),
+        spec: item.fields['备注规格'] || '',
+        period: item.fields['所属期数'] || '',
+        supply_type: item.fields['供稿类型'] || '',
+        design_service: item.fields['美工服务'] || ''
       }));
 
       return new Response(
