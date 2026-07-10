@@ -361,7 +361,7 @@ async function handleWecomKf(request) {
       } else {
         sendResult = await kfSendText(msg.external_userid, msg.open_kfid, reply);
       }
-      replies.push({ msgid: msg.msgid, content, reply.slice(0, 80), sendResult });
+      replies.push({ msgid: msg.msgid, content, reply_text: reply.slice(0, 80), sendResult });
     }
     _seenMsgIds = [...seen].slice(-200); // 内存去重，保留最近 200 条
     _lastCb = {
