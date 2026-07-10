@@ -8,6 +8,10 @@
  *   POST /admin/toggle       上下架（P2：X-Admin-Token 校验）
  *   GET/POST /wecom/kf       微信客服回调（验签 + AES 解密 + Taco 大脑）
  *
+ * ⚠ ESA 路由现状：函数只绑定在 /inventory 前缀（前方一致）。为免改控制台路由，
+ *   回调 URL 直接用 /inventory 前缀相乘：https://api.tabako.online/inventory/wecom/kf
+ *   路由分发已用 endsWith 判定，故 /inventory/wecom/kf 与 /wecom/kf 均可命中。
+ *
  * 注意：ESA 运行时无 process.env，密钥直接硬编码（private 仓库）。
  * 微信客服 secret 需用户在「企业内部接入」开启后获取并替换下方占位。
  */
@@ -109,10 +113,14 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
     try {
-      if (url.pathname === '/inventory' && request.method === 'GET') return await handleInventory();
-      if (url.pathname === '/order' && request.method === 'POST') return await handleOrder(request);
-      if (url.pathname === '/admin/toggle' && request.method === 'POST') return await handleAdminToggle(request);
-      if (url.pathname === '/wecom/kf') return await handleWecomKf(request);
+      const p = url.pathname;
+      // 用 endsWith 兼容两种 ESA 路由：
+      //   A) 路由保持 /inventory 前缀 → 回调用 /inventory/wecom/kf（零控制台改动）
+      //   B) 路由改成 /* 或新增 /wecom/kf → 回调用 /wecom/kf
+      if (p === '/inventory' && request.method === 'GET') return await handleInventory();
+      if (p.endsWith('/wecom/kf')) return await handleWecomKf(request);
+      if (p.endsWith('/order') && request.method === 'POST') return await handleOrder(request);
+      if (p.endsWith('/admin/toggle') && request.method === 'POST') return await handleAdminToggle(request);
       return json({ error: 'not found' }, 404);
     } catch (e) {
       return json({ error: e.message }, 500);
