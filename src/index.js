@@ -35,6 +35,9 @@ const WECOM_AES_KEY   = 'HpAE9zgG78lW5oyVhL4MYs4Xzjswbw9HlHLRrQG2tgZ';
 const MP_TOKEN    = 'qwertasdfg134Q';   // 公众号 Token（mp.weixin.qq.com 基本配置自定义，可和微信客服相同或不同）
 const MP_AES_KEY = WECOM_AES_KEY;       // 公众号 EncodingAESKey（仅「安全模式」需要；推荐「明文模式」，此项忽略）
 
+// ============ 部署版本探针（用于确认 ESA 是否真的部署了本次 commit） ============
+const BUILD_TAG = '2026-07-11-v3-inventory-brain';
+
 // ============ CORS ============
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -126,6 +129,7 @@ export default {
       if (p.endsWith('/inventory/chat') && request.method === 'POST') return await handleChatApi(request);
       if (p.endsWith('/inventory/chat') && request.method === 'GET') return await handleChatUi();
       if (p.endsWith('/wecom/kf')) return await handleWecomKf(request);
+      if (p.endsWith('/inventory/version')) return new Response(JSON.stringify({ build: BUILD_TAG, time: new Date().toISOString() }), { headers: CORS });
       if (p.endsWith('/inventory/mp')) return await handleMp(request); // 微信公众号被动回复（个人订阅号免认证/备案）
       if (p.endsWith('/wecom/debug')) return new Response(JSON.stringify(_lastCb || { note: '尚无回调记录' }, null, 2), { headers: CORS });
       if (p.endsWith('/order') && request.method === 'POST') return await handleOrder(request);
