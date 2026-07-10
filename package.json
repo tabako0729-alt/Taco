@@ -1,0 +1,9 @@
+{
+  "name": "taco-inventory-proxy",
+  "version": "1.0.0",
+  "description": "飞书库存代理 - ESA 边缘函数，为 tabako.online 提供实时广告位库存查询接口",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "echo 'No build step required for edge function'"
+  }
+}
