@@ -317,16 +317,27 @@ const TACO_TOOLS = [
   { type:'function', function:{ name:'write_order', description:'写入一条订单（接单动作）。写单前槽位必须收齐。资源ID不确定时可只传 name（资源名称），工具自动解析；禁止编造 itemId。', parameters:{ type:'object', properties:{ itemId:{type:'string',description:'资源ID，不确定就留空改�� name，禁止编造'}, name:{type:'string',description:'资源名称，如「通栏Banner」，不知确切ID时传这个'}, enterprise:{type:'string'}, region:{type:'string'}, amount:{type:'number',description:'成交金额（元，如150000）'}, contact:{type:'string'}, phone:{type:'string'}, period:{type:'string'} }, required:['enterprise','region','amount','contact','phone','period'] } } },
 ];
 
+// P0-B 库存缓存：库存几小时不变，60s TTL 足够；全表查询 600ms→~5ms（命中缓存）。
+let _invCache = { ts: 0, data: null };
+async function getInventoryRaw() {
+  const now = Date.now();
+  if (_invCache.data && now - _invCache.ts < 60000) return { data: _invCache.data, fromCache: true };
+  const data = await feishuList(TBL_INVENTORY);
+  _invCache = { ts: now, data };
+  return { data, fromCache: false };
+}
+
 async function tacoToolImpl(name, args) {
   if (name === 'get_inventory') {
-    let items = await feishuList(TBL_INVENTORY);
+    const { data: _raw, fromCache } = await getInventoryRaw();
+    let items = _raw;
     if (args.filter_status) items = items.filter(i => (i.fields['当前状态'] || '').includes(args.filter_status));
     if (args.name) items = items.filter(i => (i.fields['资源名称'] || '').includes(args.name));
     if (args.media_type) items = items.filter(i => (i.fields['媒体类型'] || '').includes(args.media_type));
     if (args.period) items = items.filter(i => (i.fields['所属期数'] || '').includes(args.period));
     if (args.has_art === '含美工') items = items.filter(i => (i.fields['美工服务'] || '').includes('含美工'));
     if (args.location) items = items.filter(i => (i.fields['版面/位置'] || i.fields['备注规格'] || '').includes(args.location));
-    return { count: items.length, items: items.map(i => ({ 资源ID:i.fields['资源ID'], 资源名称:i.fields['资源名称'], 期数:i.fields['所属期数'], 媒体类型:i.fields['媒体类型'], 规格:i.fields['备注规格'], 刊例价格:i.fields['刊例价格'] != null ? toWan(i.fields['刊例价格']) : null, 状态:i.fields['当前状态'], 美工:i.fields['美工服务'], 供稿:i.fields['供稿类型'], 位置:i.fields['版面/位置'] })) };
+    return { count: items.length, items: items.map(i => ({ 资源ID:i.fields['资源ID'], 资源名称:i.fields['资源名称'], 期数:i.fields['所属期数'], 媒体类型:i.fields['媒体类型'], 规格:i.fields['备注规格'], 刊例价格:i.fields['刊例价格'] != null ? toWan(i.fields['刊例价格']) : null, 状态:i.fields['当前状态'], 美工:i.fields['美工服务'], 供稿:i.fields['供稿类型'], 位置:i.fields['版面/位置'] })), cached: fromCache };
   }
   if (name === 'lookup_customer') {
     if (!args.enterprise) return { found:false, reason:'缺少企业名称' };
@@ -349,11 +360,11 @@ async function tacoToolImpl(name, args) {
     let invRecId = null;
     if (typeof args.itemId === 'string' && args.itemId.startsWith('rec')) invRecId = args.itemId;
     else if (args.itemId) {
-      const invRecs = await feishuList(TBL_INVENTORY, `CurrentValue.[资源ID] = "${args.itemId}"`);
+      const invRecs = (await getInventoryRaw()).data.filter(i => (i.fields['资源ID'] || '') === args.itemId);
       if (invRecs.length) invRecId = invRecs[0].record_id;
     }
     if (!invRecId) {
-      const all = await feishuList(TBL_INVENTORY);
+      const all = (await getInventoryRaw()).data;
       for (const cand of [args.name, args.itemId].map(normName).filter(Boolean)) {
         const hit = all.find(i => { const rn = i.fields['资源名称'] || ''; return rn && (rn.includes(cand) || cand.includes(rn)); });
         if (hit) { invRecId = hit.record_id; break; }
@@ -407,12 +418,83 @@ function extractInventoryArgs(text) {
   return args;
 }
 
+// ============ P0-C Tool Result Template（简单库存/价格/规格查询跳过第二轮 LLM） ============
+// 仅对「单一事实 / 列表」类简单查询渲染模板；含推荐/预算/方案/规划等复合意图不触发，交回 LLM。
+// 路由器活在 agent 运行时内（tacoBrain），不下沉到边缘规则层（违宪法）。
+function findSlotItem(items, text) {
+  const t = String(text).replace(/\s/g, '').toLowerCase();
+  const kws = ['封底', '封面', '通栏banner', '通栏', '推文', '专访', '整版', '半版', '1/3版', '跨版', '中缝', '头版', '二版', '报花'];
+  for (const kw of kws) {
+    if (!t.includes(kw)) continue;
+    const hit = items.find(i => {
+      const n = String(i.资源名称 || '').replace(/\s/g, '').toLowerCase();
+      const p = String(i.位置 || '').replace(/\s/g, '').toLowerCase();
+      return n.includes(kw) || p.includes(kw);
+    });
+    if (hit) return hit;
+  }
+  return null;
+}
+function isSimpleInventoryQuery(text) {
+  if (/(推荐|该投|怎么投|预算|方案|适合|建议|规划|投放策略|组合|投放计划|roi|分析|对比|比较)/i.test(text)) return false;
+  return /(价格|多少钱|刊例|报价|费用|贵|便宜|规格|尺寸|dpi|格式|多大|毫米|mm|有哪些|哪些|列表|全部|一览|都有什么|都有啥|可购买|在售|库存|最贵|最高|最便宜|最低|最划算|什么资源|什么广告位|第.{1,2}期|封底|封面|通栏|推文|专访|整版|半版)/.test(text);
+}
+function priceNum(s) {
+  if (s == null) return -1;
+  const m = String(s).match(/([\d.]+)\s*万/);
+  return m ? parseFloat(m[1]) * 10000 : -1;
+}
+function renderInventoryTemplate(userText, invData) {
+  const items = (invData && invData.items) || [];
+  if (!items.length) return '当前未查询到匹配的广告位，可换个关键词或联系客服确认实时库存。';
+  const text = String(userText);
+  if (/(有哪些|哪些|列表|全部|一览|都有什么|都有啥|什么资源|什么广告位|可购买|在售|库存|第.{1,2}期)/.test(text) || (!/(价格|规格|尺寸|最贵|最便宜|最划算)/.test(text) && findSlotItem(items, text) === null)) {
+    const lines = items.slice(0, 15).map(it => `· ${it.资源名称}（${it.媒体类型}/${it.期数}） ${it.刊例价格 != null ? it.刊例价格 : '面议'} · ${it.状态}`);
+    return `共 ${invData.count} 个广告位：\n` + lines.join('\n') + (invData.count > 15 ? `\n…（共 ${invData.count} 个，可进一步筛选）` : '');
+  }
+  if (/(最贵|最高|顶配)/.test(text)) {
+    const top = items.filter(i => priceNum(i.刊例价格) > 0).sort((a, b) => priceNum(b.刊例价格) - priceNum(a.刊例价格))[0];
+    if (top) return `目前最贵的广告位是【${top.资源名称}】，${top.媒体类型}·${top.期数}，刊例价格 ${top.刊例价格}，规格 ${top.规格 != null ? top.规格 : '—'}，状态 ${top.状态}。`;
+  }
+  if (/(最便宜|最低|性价比高)/.test(text)) {
+    const low = items.filter(i => priceNum(i.刊例价格) > 0).sort((a, b) => priceNum(a.刊例价格) - priceNum(b.刊例价格))[0];
+    if (low) return `目前最便宜的广告位是【${low.资源名称}】，${low.媒体类型}·${low.期数}，刊例价格 ${low.刊例价格}，规格 ${low.规格 != null ? low.规格 : '—'}，状态 ${low.状态}。`;
+  }
+  if (/(价格|多少钱|刊例|报价|费用|贵|便宜|花费)/.test(text)) {
+    const hit = findSlotItem(items, text);
+    if (hit) return `【${hit.资源名称}】${hit.媒体类型}·${hit.期数}，刊例价格 ${hit.刊例价格 != null ? hit.刊例价格 : '面议'}。规格：${hit.规格 != null ? hit.规格 : '—'}。当前状态：${hit.状态}。`;
+  }
+  if (/(规格|尺寸|dpi|格式|多大|毫米|mm)/.test(text)) {
+    const hit = findSlotItem(items, text);
+    if (hit) return `【${hit.资源名称}】规格：${hit.规格 != null ? hit.规格 : '—'}（位置：${hit.位置 != null ? hit.位置 : '—'}），状态 ${hit.状态}。`;
+  }
+  return null;
+}
+
+// Phase 1 Smart Router（运行时内 pre-LLM 分类；宪法要求不下沉边缘）
+const GREETING_REPLY = '您好！我是寰宇传媒 Taco 广告位接单智能体。您可以问我：某广告位的价格/规格、某期有哪些资源、最贵/最便宜的广告位，或描述预算让我帮您推荐方案。';
+function routeSimple(text) {
+  const t = String(text || '').trim();
+  if (/^(你好|您好|hi|hello|嗨|hey|哈喽|在吗|在的)\s*[！!。.？?~～]*$/i.test(t)) return 'greeting';
+  if (isSimpleInventoryQuery(t)) return 'inventory';
+  return null;
+}
+
 async function tacoBrain(text) {
   if (!GLM_API_KEY || GLM_API_KEY.indexOf('TODO') === 0) {
     return '⚠️ Taco 大脑未配置 LLM Key（GLM_API_KEY）。请在边缘函数填入智谱 GLM key 后重新部署，即可跑通真实接单闭环。';
   }
   const messages = [{ role:'system', content: TACO_SYSTEM_PROMPT }, { role:'user', content: text }];
+  // Phase 1 Smart Router（运行时内 pre-LLM 分类）：问候零延迟；简单库存意图直接取数+模板，跳过整轮 LLM
+  const route = routeSimple(text);
+  if (route === 'greeting') return GREETING_REPLY;
+  if (route === 'inventory') {
+    const inv = await tacoToolImpl('get_inventory', extractInventoryArgs(text));
+    const tpl = renderInventoryTemplate(text, inv);
+    if (tpl) return tpl;
+  }
   let forcedBias = false; // Tool Bias 安全网标志，确保只强制取数一次
+  const toolCallsLog = []; // 工具调用日志（P0-C 快路径判定用）
   for (let step = 0; step < 5; step++) {
     const payload = { model:GLM_MODEL, messages: sanitizeMessages(messages), tools:TACO_TOOLS, tool_choice:'auto', temperature:0.3 };
     const r = await fetch(GLM_ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+GLM_API_KEY}, body: JSON.stringify(payload) });
@@ -431,6 +513,11 @@ async function tacoBrain(text) {
         forcedBias = true;
         const args = extractInventoryArgs(text);
         const invData = await tacoToolImpl('get_inventory', args);
+        // P0-C：简单问法直接模板渲染，省去第二轮 LLM（4s→<1s）
+        if (isSimpleInventoryQuery(text)) {
+          const tpl = renderInventoryTemplate(text, invData);
+          if (tpl) return tpl;
+        }
         messages.push({ role:'system', content: '【工具调用纪律·强制取数】以下是飞书实时库存数据，你必须且只能基于它作答，禁止凭训练记忆编造：\n' + JSON.stringify(invData, null, 2) });
         continue;
       }
@@ -441,7 +528,13 @@ async function tacoBrain(text) {
     for (const tc of msg.tool_calls) {
       let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
       let result; try { result = await tacoToolImpl(tc.function.name, args); } catch (e) { result = { error: e.message }; }
+      toolCallsLog.push({ name: tc.function.name, result });
       messages.push({ role:'tool', tool_call_id: tc.id, content: JSON.stringify(result, null, 2) });
+    }
+    // P0-C：单次库存查询的简单问法，直接模板渲染，跳过第二轮 LLM（4s→<1s）
+    if (toolCallsLog.length === 1 && toolCallsLog[0].name === 'get_inventory' && isSimpleInventoryQuery(text)) {
+      const tpl = renderInventoryTemplate(text, toolCallsLog[0].result);
+      if (tpl) return tpl;
     }
   }
   return '（已达工具调用步数上限，请补充信息或重试）';
